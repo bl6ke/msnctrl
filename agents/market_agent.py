@@ -1,3 +1,7 @@
+import os
+import anthropic
+from dotenv import load_dotenv
+
 from data.market_data import get_full_market_data
 
 
@@ -89,6 +93,85 @@ def get_market_analysis(force_refresh: bool = False) -> dict:
         "NQ": {**data["NQ"], "analysis": _analyze_ticker(data["NQ"])},
         "ES": {**data["ES"], "analysis": _analyze_ticker(data["ES"])},
     }
+
+
+_SYSTEM_PROMPT = """You are an expert ICT (Inner Circle Trader) market analyst specializing in NQ (Nasdaq futures) and ES (S&P 500 futures). You apply ICT concepts including:
+
+- Premium/discount zones relative to session and daily ranges
+- Asia, London, and New York session analysis
+- Opening Range Breakout (ORB) context (8:00–8:15am ET)
+- Previous Day High/Low (PDH/PDL) as liquidity targets
+- Previous Week High/Low (PWH/PWL) as macro levels
+- Fair Value Gaps (FVG), order blocks, and market structure shifts
+- Liquidity sweeps and stop hunts
+- Kill zones (Asia 8pm–2am ET, London 3am–8am ET, NY 8am–12pm ET)
+
+Provide concise, actionable analysis. When levels are referenced, include the exact price. When discussing bias, explain the ICT reasoning behind it."""
+
+
+def _format_market_context(analysis: dict) -> str:
+    ts = analysis.get("timestamp", "N/A")
+    lines = [f"=== LIVE MARKET DATA (as of {ts} ET) ===\n"]
+
+    for ticker in ("NQ", "ES"):
+        snap = analysis.get(ticker, {})
+        price = snap.get("current_price")
+        prev = snap.get("prev_day", {})
+        week = snap.get("week", {})
+        sessions = snap.get("sessions", {})
+        asia = sessions.get("asia", {})
+        london = sessions.get("london", {})
+        orb = sessions.get("orb", {})
+        ict = snap.get("analysis", {})
+        liq = ict.get("liquidity_levels", {})
+
+        lines.append(f"--- {ticker} ---")
+        lines.append(f"Current Price: {price}")
+
+        lines.append(f"Prev Day: O={prev.get('open')} H={prev.get('high')} L={prev.get('low')} C={prev.get('close')}")
+        if "prev_day_midpoint" in ict:
+            lines.append(f"  Midpoint: {ict['prev_day_midpoint']}  Range: {ict.get('prev_day_range')}  Zone: {ict.get('prev_day_zone')}")
+
+        cw = week.get("current_week", {})
+        pw = week.get("prev_week", {})
+        lines.append(f"Current Week: H={cw.get('high')} L={cw.get('low')}  Weekly Zone: {ict.get('weekly_zone', 'N/A')}")
+        lines.append(f"Prev Week: H={pw.get('high')} L={pw.get('low')}")
+
+        lines.append(f"Asia Session: H={asia.get('high')} L={asia.get('low')} Mid={asia.get('mid')}  Bias: {ict.get('asia_bias', 'N/A')}")
+        lines.append(f"London Session: H={london.get('high')} L={london.get('low')} Mid={london.get('mid')}  Bias: {ict.get('london_bias', 'N/A')}")
+        lines.append(f"ORB (8:00–8:15 ET): H={orb.get('high')} L={orb.get('low')} Mid={orb.get('mid')}  Position: {ict.get('orb_position', 'N/A')}")
+
+        lines.append("Key Liquidity Levels:")
+        for label, val in liq.items():
+            lines.append(f"  {label}: {val}")
+
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def chat(message: str, history: list) -> str:
+    load_dotenv()
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise ValueError("ANTHROPIC_API_KEY not found in environment or .env file")
+
+    analysis = get_market_analysis()
+    market_context = _format_market_context(analysis)
+
+    system = f"{_SYSTEM_PROMPT}\n\n{market_context}"
+
+    messages = list(history) + [{"role": "user", "content": message}]
+
+    client = anthropic.Anthropic(api_key=api_key)
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=16000,
+        system=system,
+        messages=messages,
+    )
+
+    return next(b.text for b in response.content if b.type == "text")
 
 
 if __name__ == "__main__":
